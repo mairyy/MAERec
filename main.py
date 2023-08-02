@@ -347,7 +347,7 @@ class Coach:
                 seq_len = (seq > 0).cpu().numpy().sum(-1)
 
                 sort_lists.append(all_scr)
-                batch_size += seq_len
+                batch_size += seq
 
             sort_lists = t.cat(sort_lists, dim=0)
 
