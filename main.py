@@ -13,13 +13,20 @@ import os
 t.manual_seed(args.seed)
 np.random.seed(args.seed)
 
+class PredictMetric(object):
+    def __call__(self, predicts, labels):
+        predicts_sort = t.argsort(predicts, dim=-1, descending=True)
+        diff = predicts_sort - labels.reshape(-1, 1)
+        sort_index = t.argmax((diff == 0).type_as(diff), dim=-1)
+        return sort_index, predicts.shape[0]
+
 class Coach:
     def __init__(self, handler):
         self.handler = handler
 
         log(f"Users: {args.user}, Items(+1): {args.item}")
         self.metrics = dict()
-        mets = ['loss', 'loss_main', 'hr@10', 'ndcg@10']
+        mets = ['loss', 'loss_main', 'recall@10', 'ndcg@10']
         for met in mets:
             self.metrics['Train' + met] = list()
             self.metrics['Test' + met] = list()
@@ -45,22 +52,22 @@ class Coach:
             stloc = 0
             log('Model Initialized')
         bestRes = None
-        reses = self.test_epoch()
+        reses = self.test_MMSRec_Metric()
         for ep in range(stloc, args.epoch):
             tst_flag = (ep % args.test_frequency == 0)
             reses = self.train_epoch()
             log(self.make_print('Train', ep, reses, tst_flag))
             sys.stdout.flush()
             if tst_flag:
-                reses = self.test_epoch()
+                reses = self.test_MMSRec_Metric()
                 log(self.make_print('Test', ep, reses, tst_flag))
                 sys.stdout.flush()
-                if bestRes is None or reses['hr@10'] > bestRes['hr@10']:
+                if bestRes is None or reses['recall@10'] > bestRes['recall@10']:
                     bestRes = reses
                     log(self.make_print('Best Result', args.epoch, bestRes, True), bold=True)
                     self.save_history()
             print()
-        reses = self.test_epoch()
+        reses = self.test_MMSRec_Metric()
         log(self.make_print('Test', args.epoch, reses, True))
         log(self.make_print('Best Result', args.epoch, bestRes, True), bold=True)
 
@@ -200,7 +207,7 @@ class Coach:
                     group_h20[j] += gp_h20[j]
                     group_n20[j] += gp_n20[j]
                     group_num[j] += gp_num[j]
-                log('Steps %d/%d: hr@10 = %.2f, ndcg@10 = %.2f          ' % (i, steps, h10, n10), save=False, oneline=True)
+                log('Steps %d/%d: recall@10 = %.2f, ndcg@10 = %.2f          ' % (i, steps, h10, n10), save=False, oneline=True)
                 sys.stdout.flush()
 
         ep_h5 /= num
@@ -309,6 +316,96 @@ class Coach:
 
         log('Model Loaded from ' + args.load_model)
 
+    def test_MMSRec_Metric(self):
+        self.encoder.eval()
+        self.decoder.eval()
+        self.recommender.eval()
+        self.masker.eval()
+        self.sampler.eval()
+
+        tst_loader = self.handler.tst_loader
+        ep_r5, ep_n5, ep_r10, ep_n10, ep_r20, ep_n20, ep_r50, ep_n50  = [0] * 8
+        group_h20 = [0] * 4
+        group_n20 = [0] * 4
+        group_num = [0] * 4
+        num = tst_loader.dataset.__len__()
+        steps = num // args.tst_batch
+
+        sort_lists = []
+        batch_size = 0
+
+        with t.no_grad():
+            for i, batch_data in enumerate(tst_loader):
+                batch_data = [i.cuda() for i in batch_data]
+                seq, pos, neg = batch_data
+                item_emb, item_emb_his = self.encoder(self.handler.ii_adj)
+                seq_emb = self.recommender(seq, item_emb)
+                seq_emb = seq_emb[:,-1,:] # (batch, 1, latdim)
+                all_ids = t.cat([pos, neg], -1) # (batch, 100)
+                all_emb = item_emb[all_ids] # (batch, 100, latdim)
+                all_scr = t.sum(t.unsqueeze(seq_emb, 1) * all_emb, -1) # (batch, 100)
+                seq_len = (seq > 0).cpu().numpy().sum(-1)
+
+                sort_lists.append(all_scr)
+                batch_size += seq_len
+
+            sort_lists = t.cat(sort_lists, dim=0)
+
+            Recall10 = self._calc_Recall(sort_lists, batch_size, 10)
+            Recall50 = self._calc_Recall(sort_lists, batch_size, 50)
+            NDCG10 = self._calc_NDCG(sort_lists, batch_size, 10)
+            NDCG50 = self._calc_NDCG(sort_lists, batch_size, 50)
+        #         h5, n5, h10, n10, h20, n20, h50, n50, gp_h20, gp_n20, gp_num= \
+        #             self.calc_res(all_scr.cpu().numpy(), all_ids.cpu().numpy(), pos.cpu().numpy(), seq_len)
+        #         ep_h5 += h5
+        #         ep_n5 += n5
+        #         ep_h10 += h10
+        #         ep_n10 += n10
+        #         ep_h20 += h20
+        #         ep_n20 += n20
+        #         ep_h50 += h50
+        #         ep_n50 += n50
+        #         for j in range(4):
+        #             group_h20[j] += gp_h20[j]
+        #             group_n20[j] += gp_n20[j]
+        #             group_num[j] += gp_num[j]
+        #         log('Steps %d/%d: hr@10 = %.2f, ndcg@10 = %.2f          ' % (i, steps, h10, n10), save=False, oneline=True)
+        #         sys.stdout.flush()
+
+        # ep_h5 /= num
+        # ep_n5 /= num
+        # ep_h10 /= num 
+        # ep_n10 /= num 
+        # ep_h20 /= num 
+        # ep_n20 /= num 
+        # ep_h50 /= num 
+        # ep_n50 /= num 
+
+        # for i in range(4):
+        #     group_h20[i] /= group_num[i]
+        #     group_n20[i] /= group_num[i]
+
+        ret = dict()
+        ret['recall@10'] = Recall10
+        ret['recall@50'] = Recall50
+        ret['ndcg@10'] = NDCG10
+        ret['ndcg@50'] = NDCG50
+
+        print(f'Test result: r10={Recall10:.4f} n10={NDCG10:.4f} r50={Recall50:.4f} n50={NDCG50:.4f}')
+
+        return ret
+    
+    def _calc_Recall(self, sort_lists, batch_size, topk=10):
+        Recall_result = t.sum(sort_lists < topk) / batch_size
+        return Recall_result
+
+
+    def _calc_NDCG(self, sort_lists, batch_size, topk=10):
+        hit = sort_lists < topk
+        NDCG_score = hit * (1 / t.log2(sort_lists + 2))
+        NDCG_result = t.sum(NDCG_score) / batch_size
+        return NDCG_result
+    
 if __name__ == '__main__':
     logger.saveDefault = True
     
