@@ -319,7 +319,7 @@ if __name__ == '__main__':
     logger.saveDefault = True
     
     print(args)
-
+    log(args)
     log('Start')
     handler = DataHandler()
     handler.load_data()

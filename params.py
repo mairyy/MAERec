@@ -27,5 +27,6 @@ def ParseArgs():
     parser.add_argument("--attention_probs_dropout_prob", type=float, default=0.3, help="attention dropout p")
     parser.add_argument("--hidden_dropout_prob", type=float, default=0.3, help="hidden dropout p")
     parser.add_argument('--save_path', default='tem', help='file name to save model and training record')
+    parser.add_argument('--log_path', default='log.txt', help='file name to save results')
     return parser.parse_args()
 args = ParseArgs()
